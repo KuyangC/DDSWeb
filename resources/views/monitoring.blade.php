@@ -44,76 +44,49 @@
     </div>
 
     <!-- Main Grid - 63 Slaves -->
-    <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-3">
-        <!-- Zone Grid - 63 slaves dengan 5 zones each -->
-        <div class="grid grid-cols-9 gap-2">
-            @foreach($slaveData as $slave)
-            <div class="border rounded-lg p-2 bg-gray-50 slave-container" 
-                 data-slave="{{ $slave['slave_number'] }}"
-                 data-status="{{ $slave['status'] }}">
-                
-                <!-- Slave Header -->
-                <div class="text-center mb-2">
-                    <div class="text-xs font-bold text-gray-700 {{ $slave['status'] === 'ALARM' ? 'animate-pulse' : '' }}">
-                        {{ $slave['display_name'] ?? 'S' . $slave['slave_number'] }}
-                    </div>
-                    @if($slave['bell_active'])
-                    <div class="text-xs text-red-600 font-bold">🔔 BELL</div>
-                    @endif
+<div class="bg-white rounded-lg shadow-sm border border-gray-200 p-3">
+    <!-- Zone Grid - 63 slaves dengan 5 zones each -->
+    <div class="grid grid-cols-9 gap-2" id="slave-grid">
+        @foreach($slaveData as $slave)
+        <div class="border rounded-lg p-2 bg-gray-50 slave-container" 
+             data-slave="{{ $slave['slave_number'] }}"
+             data-status="{{ $slave['status'] }}">
+            
+            <!-- Slave Header -->
+            <div class="text-center mb-2">
+                <div class="text-xs font-bold text-gray-700 {{ $slave['status'] === 'ALARM' ? 'animate-pulse text-red-600' : '' }}" 
+                     id="slave-name-{{ $slave['slave_number'] }}">
+                    {{ $slave['display_name'] }}
                 </div>
+                @if($slave['bell_active'])
+                <div class="text-xs text-red-600 font-bold" id="slave-bell-{{ $slave['slave_number'] }}">🔔 BELL</div>
+                @else
+                <div class="text-xs text-red-600 font-bold hidden" id="slave-bell-{{ $slave['slave_number'] }}"></div>
+                @endif
+            </div>
 
-                <!-- Zone Status Indicators WITH TEXT -->
-                <div class="grid grid-cols-5 gap-1">
-                    @foreach($slave['zones'] as $zone)
-                    <div class="zone-indicator status-{{ strtolower($zone['status']) }} rounded border cursor-pointer hover:shadow-sm transition-all flex items-center justify-center"
-                         data-slave="{{ $slave['slave_number'] }}"
-                         data-zone="{{ $zone['number'] }}"
-                         data-status="{{ $zone['status'] }}"
-                         onclick="showZoneDetail({{ $slave['slave_number'] }}, {{ $zone['number'] }}, {{ $zone['global_number'] }}, '{{ $zone['status'] }}', {{ $zone['alarm'] ? 'true' : 'false' }}, {{ $zone['trouble'] ? 'true' : 'false' }}, {{ $zone['bell'] ? 'true' : 'false' }}, '{{ $slave['raw_data'] }}')"
-                         title="Slave {{ $slave['slave_number'] }} - Zone {{ $zone['number'] }} - {{ $zone['status'] }}">
-                         
-                         <!-- TEXT INSIDE ZONE -->
-                         <span class="zone-text text-xs font-bold {{ $zone['status'] === 'ALARM' ? 'text-white' : 'text-gray-800' }}">
-                             {{ $zone['display_text'] }}
-                         </span>
-                    </div>
-                    @endforeach
+            <!-- Zone Status Indicators WITH TEXT -->
+            <div class="grid grid-cols-5 gap-1">
+                @foreach($slave['zones'] as $zone)
+                <div class="zone-indicator status-{{ strtolower($zone['status']) }} rounded border cursor-pointer hover:shadow-sm transition-all flex items-center justify-center"
+                     id="zone-{{ $slave['slave_number'] }}-{{ $zone['number'] }}"
+                     data-slave="{{ $slave['slave_number'] }}"
+                     data-zone="{{ $zone['number'] }}"
+                     data-status="{{ $zone['status'] }}"
+                     onclick="showZoneDetail({{ $slave['slave_number'] }}, {{ $zone['number'] }}, {{ $zone['global_number'] }}, '{{ $zone['status'] }}', {{ $zone['alarm'] ? 'true' : 'false' }}, {{ $zone['trouble'] ? 'true' : 'false' }}, {{ $zone['bell'] ? 'true' : 'false' }}, '{{ $slave['raw_data'] }}')"
+                     title="Slave {{ $slave['slave_number'] }} - Zone {{ $zone['number'] }} - {{ $zone['status'] }}">
+                     
+                     <!-- TEXT INSIDE ZONE -->
+                     <span class="zone-text text-xs font-bold {{ $zone['status'] === 'ALARM' ? 'text-white' : 'text-gray-800' }}">
+                         {{ $zone['display_text'] }}
+                     </span>
                 </div>
-            </div>
-            @endforeach
-        </div>
-    </div>
-
-    <!-- Debug Info -->
-    <div class="bg-yellow-50 border border-yellow-200 rounded p-3 mt-3">
-        <div class="text-sm text-yellow-800">
-            <strong>Debug Info:</strong> 
-            Total Slaves: {{ count($slaveData) }}, 
-            System Status: {{ $systemStatus ?? 'NULL' }},
-            Bell Status: {{ $bellStatus ?? 'NULL' }}
-        </div>
-    </div>
-
-    <!-- Zone Detail Panel -->
-    <div class="bg-white rounded-lg shadow-sm border border-gray-200 mt-3 p-3">
-        <div class="flex justify-between items-center mb-2">
-            <h2 class="font-semibold text-sm text-gray-700">ZONE DETAIL</h2>
-            <div class="flex space-x-2">
-                <button onclick="testConnection()" class="text-xs bg-blue-500 hover:bg-blue-400 text-white px-2 py-1 rounded">
-                    Test Connection
-                </button>
-                <button onclick="clearEventLog()" class="text-xs bg-gray-500 hover:bg-gray-400 text-white px-2 py-1 rounded">
-                    Clear Log
-                </button>
+                @endforeach
             </div>
         </div>
-        <div id="zone-detail">
-            <div class="text-center text-gray-500 text-sm py-4">
-                Click on any zone to see details
-            </div>
-        </div>
+        @endforeach
     </div>
-
+</div>
     <!-- Event Log -->
     <div class="bg-white rounded-lg shadow-sm border border-gray-200 mt-3">
         <div class="bg-gray-800 text-green-400 font-mono text-xs p-2 rounded-t-lg h-20 overflow-y-auto" id="eventLog">
@@ -296,7 +269,7 @@ document.addEventListener('DOMContentLoaded', function() {
 .grid-cols-9 { grid-template-columns: repeat(9, minmax(0, 1fr)); }
 
 /* Animation for alarm */
-.animate-pulse { animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
+.animate-pulse { animation: pulse 2s cubic-beier(0.4, 0, 0.6, 1) infinite; }
 
 @keyframes pulse {
     0%, 100% { opacity: 1; }
