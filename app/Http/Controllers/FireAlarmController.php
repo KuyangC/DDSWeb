@@ -10,8 +10,14 @@ class FireAlarmController extends Controller
     protected $database;
     protected $totalSlaves = 63;
     protected $zonesPerSlave = 5;
+    protected $firebaseConnected = false;
 
     public function __construct()
+    {
+        $this->initializeFirebase();
+    }
+
+    private function initializeFirebase()
     {
         try {
             $serviceAccountPath = storage_path('app/firebase-credentials.json');
@@ -24,16 +30,20 @@ class FireAlarmController extends Controller
                 ->withServiceAccount($serviceAccountPath)
                 ->withDatabaseUri('https://testing1do-default-rtdb.asia-southeast1.firebasedatabase.app')
                 ->createDatabase();
-                
+
+            $this->firebaseConnected = true;
+            \Log::info('Firebase connected successfully');
+
         } catch (\Exception $e) {
             \Log::error('Firebase initialization failed: ' . $e->getMessage());
             $this->database = null;
+            $this->firebaseConnected = false;
         }
     }
 
     public function monitoring()
     {
-        if (!$this->database) {
+        if (!$this->firebaseConnected || !$this->database) {
             $emptyData = $this->generateEmptySlaveData();
             $stats = $this->calculateStatistics($emptyData);
             
@@ -43,7 +53,8 @@ class FireAlarmController extends Controller
                 'bellStatus' => 'UNKNOWN',
                 'stats' => $stats,
                 'totalSlaves' => $this->totalSlaves,
-                'totalZones' => $this->totalSlaves * $this->zonesPerSlave
+                'totalZones' => $this->totalSlaves * $this->zonesPerSlave,
+                'firebaseConnected' => false
             ]);
         }
 
@@ -54,12 +65,11 @@ class FireAlarmController extends Controller
 
             $slaveData = [];
             if (isset($allSlaveData['raw_data'])) {
-                $slaveData = $this->parseAllSlaveData($allSlaveData['raw_data']);
+                $slaveData = $this->parseCompletePoolingData($allSlaveData['raw_data']);
             } else {
                 $slaveData = $this->generateEmptySlaveData();
             }
 
-            // Hitung statistik
             $stats = $this->calculateStatistics($slaveData);
 
             return view('monitoring', compact(
@@ -83,119 +93,145 @@ class FireAlarmController extends Controller
                 'bellStatus' => 'ERROR',
                 'stats' => $stats,
                 'totalSlaves' => $this->totalSlaves,
-                'totalZones' => $this->totalSlaves * $this->zonesPerSlave
+                'totalZones' => $this->totalSlaves * $this->zonesPerSlave,
+                'firebaseConnected' => false
             ]);
         }
     }
 
-    private function parseAllSlaveData($rawData)
-    {
-        \Log::info('=== START PARSING RAW DATA ===');
-        \Log::info('Raw Data: ' . $rawData);
-        
-        if (empty($rawData)) {
-            \Log::warning('Raw data is empty');
-            return $this->generateEmptySlaveData();
-        }
-
-        // Extract semua data slave dari raw data
-        preg_match_all('/<STX>(\d+)/', $rawData, $matches);
-        
-        \Log::info('Found ' . count($matches[1]) . ' STX blocks: ' . json_encode($matches[1]));
-
-        $slaveData = [];
-        
-        foreach ($matches[1] as $index => $slaveRaw) {
-            if ($index >= $this->totalSlaves) break;
-            
-            $slaveNumber = $index + 1;
-            $parsedSlave = $this->parseSingleSlave($slaveNumber, $slaveRaw);
-            $slaveData[] = $parsedSlave;
-            
-            \Log::info("Slave {$slaveNumber} parsed: " . $parsedSlave['status'] . " | Raw: " . $slaveRaw);
-        }
-
-        // Fill yang kosong dengan data offline
-        while (count($slaveData) < $this->totalSlaves) {
-            $slaveNumber = count($slaveData) + 1;
-            $slaveData[] = $this->createOfflineSlave($slaveNumber);
-            \Log::info("Slave {$slaveNumber} created as OFFLINE (fill empty)");
-        }
-
-        \Log::info('=== END PARSING - Total slaves: ' . count($slaveData) . ' ===');
-        return $slaveData;
+ private function parseCompletePoolingData($rawData)
+{
+    if (empty($rawData)) {
+        return $this->generateEmptySlaveData();
     }
 
-    private function parseSingleSlave($slaveNumber, $rawData)
+    // Cari semua data slave
+    preg_match_all('/<STX>([0-9A-F]{2,6})/i', $rawData, $matches);
+    
+    \Log::info('Found slave segments: ' . json_encode($matches[1]));
+
+    $slaveData = [];
+    $processedAddresses = [];
+    
+    foreach ($matches[1] as $segment) {
+        // Determine slave number from ADDRESS, bukan urutan
+        $address = substr($segment, 0, 2);
+        $slaveNumber = hexdec($address); // Convert hex address to decimal
+        
+        \Log::info("Segment: {$segment} -> Address: {$address} -> Slave: {$slaveNumber}");
+        
+        // Skip jika slave number diluar range 1-63
+        if ($slaveNumber < 1 || $slaveNumber > 63) {
+            \Log::warning("Invalid slave number: {$slaveNumber} from address: {$address}");
+            continue;
+        }
+        
+        // Skip jika sudah diproses
+        if (in_array($slaveNumber, $processedAddresses)) {
+            continue;
+        }
+        
+        $processedAddresses[] = $slaveNumber;
+        $parsedSlave = $this->parseSlaveSegment($slaveNumber, $segment);
+        $slaveData[] = $parsedSlave;
+    }
+
+    // Fill sisanya dengan offline slaves berdasarkan urutan yang benar
+    $finalSlaveData = [];
+    for ($slaveNumber = 1; $slaveNumber <= $this->totalSlaves; $slaveNumber++) {
+        $found = false;
+        
+        // Cari slave yang sudah diproses
+        foreach ($slaveData as $slave) {
+            if ($slave['slave_number'] == $slaveNumber) {
+                $finalSlaveData[] = $slave;
+                $found = true;
+                break;
+            }
+        }
+        
+        // Jika tidak ditemukan, buat slave offline
+        if (!$found) {
+            $finalSlaveData[] = $this->createOfflineSlave($slaveNumber);
+        }
+    }
+
+    \Log::info('Final slave count: ' . count($finalSlaveData));
+    return $finalSlaveData;
+}
+
+    private function parseSlaveSegment($slaveNumber, $segment)
     {
-        // Handle disconnected slave (data pendek)
-        if (strlen($rawData) === 2) {
-            \Log::info("Slave {$slaveNumber} - Disconnected (2-digit data): " . $rawData);
+        // Handle slave online dengan status (data 6-digit)
+        if (strlen($segment) === 6) {
+            $address = substr($segment, 0, 2);
+            $troubleByte = hexdec(substr($segment, 2, 2));
+            $alarmByte = hexdec(substr($segment, 4, 2));
+            
+            return $this->parseSlaveStatus($slaveNumber, $address, $troubleByte, $alarmByte, $segment);
+        }
+
+        // Handle slave offline (data 2-digit)
+        if (strlen($segment) === 2) {
             return $this->createOfflineSlave($slaveNumber);
         }
 
-        // Handle data lengkap 6 digit
-        if (strlen($rawData) === 6) {
-            $address = substr($rawData, 0, 2);
-            $troubleByte = hexdec(substr($rawData, 2, 2));
-            $alarmByte = hexdec(substr($rawData, 4, 2));
+        // Data tidak dikenali
+        return $this->createOfflineSlave($slaveNumber);
+    }
+
+    private function parseSlaveStatus($slaveNumber, $address, $troubleByte, $alarmByte, $rawData)
+    {
+        $zones = [];
+        $hasAlarm = false;
+        $hasTrouble = false;
+        $bellActive = ($alarmByte & 0x20) !== 0;
+        
+        // OPTIMIZED: Loop tanpa logging berlebihan
+        for ($zoneNum = 1; $zoneNum <= 5; $zoneNum++) {
+            $bitMask = 1 << ($zoneNum - 1);
             
-            \Log::info("Slave {$slaveNumber} - Parsing 6-digit: {$rawData} | Trouble: {$troubleByte} | Alarm: {$alarmByte}");
+            $trouble = ($troubleByte & $bitMask) !== 0;
+            $alarm = ($alarmByte & $bitMask) !== 0;
             
-            $zones = [];
-            $hasAlarm = false;
-            $hasTrouble = false;
-            $bellActive = ($alarmByte & 0x20) !== 0; // Bit 5 = Bell
+            if ($alarm) $hasAlarm = true;
+            if ($trouble) $hasTrouble = true;
             
-            // Parse masing-masing zona (zona 1-5)
-            for ($zoneNum = 1; $zoneNum <= 5; $zoneNum++) {
-                $bitMask = 1 << ($zoneNum - 1); // Bit 0-4 untuk zona 1-5
-                
-                $alarm = ($alarmByte & $bitMask) !== 0;
-                $trouble = ($troubleByte & $bitMask) !== 0;
-                
-                if ($alarm) $hasAlarm = true;
-                if ($trouble) $hasTrouble = true;
-                
-                $status = 'NORMAL';
-                if ($alarm) $status = 'ALARM';
-                elseif ($trouble) $status = 'TROUBLE';
-                
-                $zones[] = [
-                    'number' => $zoneNum,
-                    'global_number' => (($slaveNumber - 1) * 5) + $zoneNum,
-                    'status' => $status,
-                    'alarm' => $alarm,
-                    'trouble' => $trouble,
-                    'bell' => $bellActive,
-                    'display_text' => 'Z' . $zoneNum
-                ];
-                
-                \Log::info("  Zone {$zoneNum}: {$status} (Alarm: " . ($alarm ? 'Y' : 'N') . ", Trouble: " . ($trouble ? 'Y' : 'N') . ")");
+            $status = 'NORMAL';
+            if ($alarm) {
+                $status = 'ALARM';
+            } elseif ($trouble) {
+                $status = 'TROUBLE';
             }
             
-            // Tentukan status overall slave
-            $overallStatus = 'NORMAL';
-            if ($hasAlarm) $overallStatus = 'ALARM';
-            elseif ($hasTrouble) $overallStatus = 'TROUBLE';
-            
-            \Log::info("Slave {$slaveNumber} Overall Status: {$overallStatus} | Bell: " . ($bellActive ? 'ACTIVE' : 'INACTIVE'));
-
-            return [
-                'slave_number' => $slaveNumber,
-                'address' => $address,
-                'status' => $overallStatus,
-                'bell_active' => $bellActive,
-                'zones' => $zones,
-                'raw_data' => $rawData,
-                'online' => true,
-                'display_name' => 'S' . $slaveNumber // ✅ NAMA SLAVE YANG BENAR
+            $zones[] = [
+                'number' => $zoneNum,
+                'global_number' => (($slaveNumber - 1) * 5) + $zoneNum,
+                'status' => $status,
+                'alarm' => $alarm,
+                'trouble' => $trouble,
+                'bell' => $bellActive,
+                'display_text' => 'Z' . $zoneNum
             ];
         }
+        
+        $overallStatus = 'NORMAL';
+        if ($hasAlarm) {
+            $overallStatus = 'ALARM';
+        } elseif ($hasTrouble) {
+            $overallStatus = 'TROUBLE';
+        }
 
-        // Data tidak dikenali
-        \Log::warning("Slave {$slaveNumber} - Unknown data format: " . $rawData);
-        return $this->createOfflineSlave($slaveNumber);
+        return [
+            'slave_number' => $slaveNumber,
+            'address' => $address,
+            'status' => $overallStatus,
+            'bell_active' => $bellActive,
+            'zones' => $zones,
+            'raw_data' => $rawData,
+            'online' => true,
+            'display_name' => 'S' . $slaveNumber
+        ];
     }
 
     private function createOfflineSlave($slaveNumber)
@@ -221,7 +257,7 @@ class FireAlarmController extends Controller
             'zones' => $zones,
             'raw_data' => '',
             'online' => false,
-            'display_name' => 'S' . $slaveNumber // ✅ NAMA SLAVE YANG BENAR
+            'display_name' => 'S' . $slaveNumber
         ];
     }
 
@@ -244,13 +280,12 @@ class FireAlarmController extends Controller
             }
         }
         
-        \Log::info('Statistics calculated: ' . json_encode($stats));
         return $stats;
     }
 
     public function getLiveStatus()
     {
-        if (!$this->database) {
+        if (!$this->firebaseConnected) {
             return response()->json([
                 'success' => false,
                 'error' => 'Firebase not connected'
@@ -264,7 +299,7 @@ class FireAlarmController extends Controller
             
             $slaveData = [];
             if (isset($allSlaveData['raw_data'])) {
-                $slaveData = $this->parseAllSlaveData($allSlaveData['raw_data']);
+                $slaveData = $this->parseCompletePoolingData($allSlaveData['raw_data']);
             } else {
                 $slaveData = $this->generateEmptySlaveData();
             }
