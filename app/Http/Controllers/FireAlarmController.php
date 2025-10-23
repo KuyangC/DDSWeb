@@ -171,39 +171,56 @@ class FireAlarmController extends Controller
     }
 
     private function parseMasterStatus($rawData)
-{
-    $defaultStatus = [
-        'ac_power' => false,
-        'dc_power' => false, 
-        'alarm_active' => false,
-        'trouble_active' => false,
-        'drill' => false,
-        'silenced' => false,
-        'disabled' => false
-    ];
-
-    // Cari pattern 40XX (4 digit hex master status)
-    if (preg_match('/40([0-9A-F]{2})/i', $rawData, $matches)) {
-        $statusByte = $matches[1];
-        $value = hexdec($statusByte);
-        
-        \Log::info("Master Status Hex: {$statusByte}, Decimal: {$value}, Binary: " . str_pad(decbin($value), 8, '0', STR_PAD_LEFT));
-        
-        // KOREKSI: AKTIF LOW - 0 = ON/ACTIVE, 1 = OFF/INACTIVE
-        // Tapi untuk tampilan UI, kita ingin: true = NYALA/HIJAU, false = MATI/ABU
-        return [
-            'ac_power' => ($value & 0x40) == 0,      // Bit 6: 0=ON→true, 1=OFF→false
-            'dc_power' => ($value & 0x20) == 0,      // Bit 5: 0=ON→true, 1=OFF→false  
-            'alarm_active' => ($value & 0x10) == 0,  // Bit 4: 0=ACTIVE→true, 1=INACTIVE→false
-            'trouble_active' => ($value & 0x08) == 0,// Bit 3: 0=ACTIVE→true, 1=INACTIVE→false
-            'drill' => ($value & 0x04) == 0,         // Bit 2: 0=ACTIVE→true, 1=INACTIVE→false
-            'silenced' => ($value & 0x02) == 0,      // Bit 1: 0=ACTIVE→true, 1=INACTIVE→false
-            'disabled' => ($value & 0x01) == 0,      // Bit 0: 0=ACTIVE→true, 1=INACTIVE→false
+    {
+        $defaultStatus = [
+            'ac_power' => false,
+            'dc_power' => false,
+            'alarm_active' => false,
+            'trouble_active' => false,
+            'drill' => false,
+            'silenced' => false,
+            'disabled' => false
         ];
+
+        // Ambil status system dari session (yang di-set dari slave data)
+        $systemAlarm = session('system_alarm_active', false);
+        $systemTrouble = session('system_trouble_active', false);
+
+        // Cari pattern 40XX (4 digit hex master status)
+        if (preg_match('/40([0-9A-F]{2})/i', $rawData, $matches)) {
+            $statusByte = $matches[1];
+            $value = hexdec($statusByte);
+
+            \Log::info("Master Status Hex: {$statusByte}, Decimal: {$value}, Binary: " . str_pad(decbin($value), 8, '0', STR_PAD_LEFT));
+
+            $result = [
+                'ac_power' => ($value & 0x40) == 0,
+                'dc_power' => ($value & 0x20) == 0,
+                'alarm_active' => $systemAlarm, // ← OVERRIDE DENGAN STATUS SYSTEM
+                'trouble_active' => $systemTrouble, // ← OVERRIDE DENGAN STATUS SYSTEM
+                'drill' => ($value & 0x04) == 0,
+                'silenced' => ($value & 0x02) == 0,
+                'disabled' => ($value & 0x01) == 0,
+            ];
+
+            \Log::info("✅ PARSED MASTER STATUS: " . json_encode($result));
+            return $result;
+        } else {
+            \Log::warning("❌ NO MASTER STATUS PATTERN FOUND in raw data");
+
+            // Fallback: gunakan status system saja
+            return [
+                'ac_power' => false,
+                'dc_power' => false,
+                'alarm_active' => $systemAlarm, // ← GUNAKAN STATUS SYSTEM
+                'trouble_active' => $systemTrouble, // ← GUNAKAN STATUS SYSTEM
+                'drill' => false,
+                'silenced' => false,
+                'disabled' => false
+            ];
+        }
     }
-    
-    return $defaultStatus;
-}
+
     private function parseCompletePoolingData($rawData)
     {
         if (empty($rawData)) {
@@ -217,11 +234,13 @@ class FireAlarmController extends Controller
 
         $slaveData = [];
         $processedAddresses = [];
+        $hasSystemAlarm = false; // ← FLAG UNTUK SYSTEM ALARM
+        $hasSystemTrouble = false; // ← FLAG UNTUK SYSTEM TROUBLE
 
         foreach ($matches[1] as $segment) {
             // Determine slave number from ADDRESS, bukan urutan
             $address = substr($segment, 0, 2);
-            $slaveNumber = hexdec($address); // Convert hex address to decimal
+            $slaveNumber = hexdec($address);
 
             \Log::info("Segment: {$segment} -> Address: {$address} -> Slave: {$slaveNumber}");
 
@@ -239,14 +258,22 @@ class FireAlarmController extends Controller
             $processedAddresses[] = $slaveNumber;
             $parsedSlave = $this->parseSlaveSegment($slaveNumber, $segment);
             $slaveData[] = $parsedSlave;
+
+            // ✅ CHECK JIKA SLAVE MEMILIKI ALARM ATAU TROUBLE
+            if ($parsedSlave['status'] === 'ALARM') {
+                $hasSystemAlarm = true;
+                \Log::info("🚨 SYSTEM ALARM TRIGGERED by Slave {$slaveNumber}");
+            } elseif ($parsedSlave['status'] === 'TROUBLE') {
+                $hasSystemTrouble = true;
+                \Log::info("⚠️ SYSTEM TROUBLE TRIGGERED by Slave {$slaveNumber}");
+            }
         }
 
-        // Fill sisanya dengan offline slaves berdasarkan urutan yang benar
+        // Fill sisanya dengan offline slaves
         $finalSlaveData = [];
         for ($slaveNumber = 1; $slaveNumber <= $this->totalSlaves; $slaveNumber++) {
             $found = false;
 
-            // Cari slave yang sudah diproses
             foreach ($slaveData as $slave) {
                 if ($slave['slave_number'] == $slaveNumber) {
                     $finalSlaveData[] = $slave;
@@ -255,13 +282,20 @@ class FireAlarmController extends Controller
                 }
             }
 
-            // Jika tidak ditemukan, buat slave offline
             if (!$found) {
                 $finalSlaveData[] = $this->createOfflineSlave($slaveNumber);
             }
         }
 
-        \Log::info('Final slave count: ' . count($finalSlaveData));
+        // ✅ SIMPAN STATUS SYSTEM KE SESSION ATAU CACHE
+        // Ini akan digunakan untuk menyalakan lampu master
+        session([
+            'system_alarm_active' => $hasSystemAlarm,
+            'system_trouble_active' => $hasSystemTrouble
+        ]);
+
+        \Log::info("System Status - Alarm: " . ($hasSystemAlarm ? 'YES' : 'NO') . ", Trouble: " . ($hasSystemTrouble ? 'YES' : 'NO'));
+
         return $finalSlaveData;
     }
 
