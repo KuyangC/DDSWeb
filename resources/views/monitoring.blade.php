@@ -5,7 +5,7 @@
     <!-- Header Stats -->
     <div class="bg-white rounded-lg shadow-sm border border-gray-200 mb-3 p-3">
         <div class="flex justify-between items-center">
-            <h1 class="text-lg font-bold text-gray-800">FIRE ALARM MONITORING - 63 SLAVES (315 ZONES)</h1>
+            <h1 class="text-lg font-bold text-gray-800">DDS - FIRE ALARM MONITORING</h1>
             <div class="flex items-center space-x-4 text-sm">
                 <div class="flex items-center space-x-2">
                     <div class="w-2 h-2 rounded-full bg-green-500"></div>
@@ -45,19 +45,23 @@
 
     <!-- Main Grid - 63 Slaves -->
     <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-3">
-        <!-- Slave Headers -->
-        <div class="grid grid-cols-9 gap-1 mb-2">
-            @for($i = 1; $i <= 63; $i++)
-                <div class="text-center text-xs font-bold bg-blue-50 py-1 rounded border">
-                    S{{ $i }}
-                </div>
-            @endfor
-        </div>
-
-        <!-- Zone Grid - 5 zones per slave -->
-        <div class="grid grid-cols-9 gap-1">
+        <!-- Zone Grid - 63 slaves dengan 5 zones each -->
+        <div class="grid grid-cols-9 gap-2">
             @foreach($slaveData as $slave)
-            <div class="border rounded p-1 bg-gray-50 slave-container" data-slave="{{ $slave['slave_number'] }}">
+            <div class="border rounded-lg p-2 bg-gray-50 slave-container" 
+                 data-slave="{{ $slave['slave_number'] }}"
+                 data-status="{{ $slave['status'] }}">
+                
+                <!-- Slave Header -->
+                <div class="text-center mb-2">
+                    <div class="text-xs font-bold text-gray-700 {{ $slave['status'] === 'ALARM' ? 'animate-pulse' : '' }}">
+                        {{ $slave['display_name'] ?? 'S' . $slave['slave_number'] }}
+                    </div>
+                    @if($slave['bell_active'])
+                    <div class="text-xs text-red-600 font-bold">🔔 BELL</div>
+                    @endif
+                </div>
+
                 <!-- Zone Status Indicators WITH TEXT -->
                 <div class="grid grid-cols-5 gap-1">
                     @foreach($slave['zones'] as $zone)
@@ -65,23 +69,15 @@
                          data-slave="{{ $slave['slave_number'] }}"
                          data-zone="{{ $zone['number'] }}"
                          data-status="{{ $zone['status'] }}"
-                         data-global="{{ $zone['global_number'] }}"
                          onclick="showZoneDetail({{ $slave['slave_number'] }}, {{ $zone['number'] }}, {{ $zone['global_number'] }}, '{{ $zone['status'] }}', {{ $zone['alarm'] ? 'true' : 'false' }}, {{ $zone['trouble'] ? 'true' : 'false' }}, {{ $zone['bell'] ? 'true' : 'false' }}, '{{ $slave['raw_data'] }}')"
-                         title="Slave {{ $slave['slave_number'] }} - Zone {{ $zone['number'] }} (Global: {{ $zone['global_number'] }}) - {{ $zone['status'] }}">
+                         title="Slave {{ $slave['slave_number'] }} - Zone {{ $zone['number'] }} - {{ $zone['status'] }}">
                          
                          <!-- TEXT INSIDE ZONE -->
                          <span class="zone-text text-xs font-bold {{ $zone['status'] === 'ALARM' ? 'text-white' : 'text-gray-800' }}">
-                             {{ $zone['display_text'] ?? 'Z' . $zone['number'] }}
+                             {{ $zone['display_text'] }}
                          </span>
                     </div>
                     @endforeach
-                </div>
-                
-                <!-- Slave Status Badge -->
-                <div class="text-center mt-1">
-                    <span class="text-xs px-1 rounded status-badge-{{ strtolower($slave['status']) }}">
-                        {{ $slave['bell_active'] ? '🔔' : '' }}{{ $slave['status'] }}
-                    </span>
                 </div>
             </div>
             @endforeach
@@ -264,8 +260,8 @@ function updateDisplay(data) {
 
 // Initialize
 document.addEventListener('DOMContentLoaded', function() {
-    setInterval(refreshData, 5000); // Refresh every 5 seconds
-    setTimeout(refreshData, 2000);  // Initial refresh
+    setInterval(refreshData, 1000); // Refresh every 5 seconds
+    setTimeout(refreshData, 500);  // Initial refresh
     
     addToEventLog('System initialized - Auto refresh enabled');
 });
