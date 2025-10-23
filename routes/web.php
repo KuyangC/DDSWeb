@@ -1,16 +1,20 @@
 <?php
 
 use Illuminate\Support\Facades\Route;
-use App\Http\Controllers\FireAlarmController; // ✅ Perbaikan namespace
+use App\Http\Controllers\FireAlarmController;
 
-Route::prefix('fire-alarm')->group(function () { // ✅ Perbaikan syntax
-    Route::get('/dashboard', [FireAlarmController::class, 'dashboard'])->name('fire-alarm.dashboard');
-    Route::get('/system-overview', [FireAlarmController::class, 'systemOverview'])->name('fire-alarm.overview'); // ✅ Perbaikan method name
-    Route::get('/zone-status/live', [FireAlarmController::class, 'getLiveZoneStatus'])->name('fire-alarm.zone-status.live'); // ✅ Tambah kurung tutup
-    Route::get('/zone/{zoneId}', [FireAlarmController::class, 'zoneDetails'])->name('fire-alarm.zone-details'); // ✅ Perbaikan parameter
-    Route::get('/alarm-history', [FireAlarmController::class, 'alarmHistory'])->name('fire-alarm.alarm-history');
+// Route utama untuk monitoring 63 slave
+Route::get('/', [FireAlarmController::class, 'monitoring'])->name('home');
+Route::get('/monitoring', [FireAlarmController::class, 'monitoring'])->name('monitoring');
+
+// API untuk live data (harus match dengan yang di blade)
+Route::get('/api/live-status', [FireAlarmController::class, 'getLiveStatus'])->name('fire-alarm.live-status');
+
+// Route untuk testing/generate data dummy
+Route::get('/test/generate-data', [FireAlarmController::class, 'generateTestData'])->name('fire-alarm.test-data');
+
+// Optional: Route group jika mau organized
+Route::prefix('fire-alarm')->name('fire-alarm.')->group(function () {
+    Route::get('/dashboard', [FireAlarmController::class, 'monitoring'])->name('dashboard');
+    Route::get('/system-overview', [FireAlarmController::class, 'monitoring'])->name('overview');
 });
-
-// Atau untuk home page langsung ke fire alarm monitoring
-Route::get('/', [FireAlarmController::class, 'monitoring'])->name('home'); // ✅ Perbaikan syntax
-Route::get('/monitoring', [FireAlarmController::class, 'monitoring'])->name('monitoring'); // ✅ Tambah route monitoring
