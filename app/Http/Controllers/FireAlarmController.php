@@ -56,7 +56,7 @@ class FireAlarmController extends Controller
                     'panelType' => 'N/A',
                     'location' => 'Fire Alarm Monitoring System'
                 ],
-                'masterStatus' => [ // DEFAULT STATUS
+                'masterStatus' => [
                     'ac_power' => false,
                     'dc_power' => false,
                     'alarm_active' => false,
@@ -109,7 +109,7 @@ class FireAlarmController extends Controller
                 ];
             }
 
-            // SLAVE DATA - JANGAN DIUBAH (existing code)
+            // SLAVE DATA
             $slaveData = [];
             if (isset($allSlaveData['raw_data'])) {
                 $slaveData = $this->parseCompletePoolingData($allSlaveData['raw_data']);
@@ -131,7 +131,7 @@ class FireAlarmController extends Controller
                 'systemStatus' => $systemStatus,
                 'bellStatus' => $bellStatus,
                 'projectInfo' => $projectInfoData,
-                'masterStatus' => $masterStatus, // ← DATA BARU
+                'masterStatus' => $masterStatus,
                 'stats' => $stats,
                 'totalSlaves' => $this->totalSlaves,
                 'totalZones' => $this->totalSlaves * $this->zonesPerSlave,
@@ -182,10 +182,6 @@ class FireAlarmController extends Controller
             'disabled' => false
         ];
 
-        // Ambil status system dari session (yang di-set dari slave data)
-        $systemAlarm = session('system_alarm_active', false);
-        $systemTrouble = session('system_trouble_active', false);
-
         // Cari pattern 40XX (4 digit hex master status)
         if (preg_match('/40([0-9A-F]{2})/i', $rawData, $matches)) {
             $statusByte = $matches[1];
@@ -193,110 +189,141 @@ class FireAlarmController extends Controller
 
             \Log::info("Master Status Hex: {$statusByte}, Decimal: {$value}, Binary: " . str_pad(decbin($value), 8, '0', STR_PAD_LEFT));
 
-            $result = [
+            return [
                 'ac_power' => ($value & 0x40) == 0,
                 'dc_power' => ($value & 0x20) == 0,
-                'alarm_active' => $systemAlarm, // ← OVERRIDE DENGAN STATUS SYSTEM
-                'trouble_active' => $systemTrouble, // ← OVERRIDE DENGAN STATUS SYSTEM
+                'alarm_active' => ($value & 0x10) == 0,
+                'trouble_active' => ($value & 0x08) == 0,
                 'drill' => ($value & 0x04) == 0,
                 'silenced' => ($value & 0x02) == 0,
                 'disabled' => ($value & 0x01) == 0,
             ];
-
-            \Log::info("✅ PARSED MASTER STATUS: " . json_encode($result));
-            return $result;
-        } else {
-            \Log::warning("❌ NO MASTER STATUS PATTERN FOUND in raw data");
-
-            // Fallback: gunakan status system saja
-            return [
-                'ac_power' => false,
-                'dc_power' => false,
-                'alarm_active' => $systemAlarm, // ← GUNAKAN STATUS SYSTEM
-                'trouble_active' => $systemTrouble, // ← GUNAKAN STATUS SYSTEM
-                'drill' => false,
-                'silenced' => false,
-                'disabled' => false
-            ];
         }
+
+        return $defaultStatus;
     }
 
     private function parseCompletePoolingData($rawData)
+{
+    if (empty($rawData)) {
+        return $this->generateEmptySlaveData();
+    }
+
+    // CHECK DRILL MODE
+    $isDrillMode = session('drill_mode', false);
+    
+    if ($isDrillMode) {
+        \Log::info('🎯 DRILL MODE ACTIVE - Forcing all slaves to ALARM');
+        return $this->generateDrillModeData();
+    }
+
+    \Log::info("Raw data to parse: " . $rawData);
+
+    // CARA YANG BENAR: Ambil 2 digit pertama sebagai address DECIMAL, bukan HEX
+    $segments = [];
+    $parts = explode('<STX>', $rawData);
+    
+    foreach ($parts as $part) {
+        // Ambil 6 digit pertama setelah <STX>
+        if (strlen($part) >= 6) {
+            $segment = substr($part, 0, 6);
+            if (preg_match('/^[0-9]{6}$/', $segment)) { // Hanya angka, bukan hex
+                $segments[] = $segment;
+            }
+        }
+    }
+
+    \Log::info('Found slave segments: ' . json_encode($segments));
+
+    $slaveData = [];
+    $processedAddresses = [];
+
+    foreach ($segments as $segment) {
+        // AMBIL 2 DIGIT PERTAMA SEBAGAI DECIMAL
+        $address = substr($segment, 0, 2);
+        $slaveNumber = intval($address); // Convert ke integer, bukan hexdec
+
+        \Log::info("Processing slave {$slaveNumber} from segment: {$segment} (address: {$address})");
+
+        // Skip jika slave number diluar range 1-63
+        if ($slaveNumber < 1 || $slaveNumber > 63) {
+            \Log::warning("Slave {$slaveNumber} out of range");
+            continue;
+        }
+
+        // Skip jika sudah diproses
+        if (in_array($slaveNumber, $processedAddresses)) {
+            \Log::warning("Duplicate slave: {$slaveNumber}");
+            continue;
+        }
+
+        $processedAddresses[] = $slaveNumber;
+        
+        // Parse data slave
+        $troubleByte = hexdec(substr($segment, 2, 2));
+        $alarmByte = hexdec(substr($segment, 4, 2));
+        
+        $parsedSlave = $this->parseSlaveStatus($slaveNumber, $address, $troubleByte, $alarmByte, $segment);
+        $slaveData[] = $parsedSlave;
+    }
+
+    \Log::info("Successfully parsed slaves: " . implode(', ', $processedAddresses));
+
+    // Fill sisanya dengan offline slaves
+    $finalSlaveData = [];
+    for ($slaveNumber = 1; $slaveNumber <= $this->totalSlaves; $slaveNumber++) {
+        $found = false;
+        foreach ($slaveData as $slave) {
+            if ($slave['slave_number'] == $slaveNumber) {
+                $finalSlaveData[] = $slave;
+                $found = true;
+                break;
+            }
+        }
+        if (!$found) {
+            \Log::warning("Slave {$slaveNumber} not found in data");
+            $finalSlaveData[] = $this->createOfflineSlave($slaveNumber);
+        }
+    }
+
+    \Log::info('Final slave count: ' . count($finalSlaveData));
+    return $finalSlaveData;
+}
+
+    private function generateDrillModeData()
     {
-        if (empty($rawData)) {
-            return $this->generateEmptySlaveData();
+        $slaves = [];
+        for ($i = 1; $i <= $this->totalSlaves; $i++) {
+            $slaves[] = $this->createDrillSlave($i);
+        }
+        return $slaves;
+    }
+
+    private function createDrillSlave($slaveNumber)
+    {
+        $zones = [];
+        for ($zoneNum = 1; $zoneNum <= 5; $zoneNum++) {
+            $zones[] = [
+                'number' => $zoneNum,
+                'global_number' => (($slaveNumber - 1) * 5) + $zoneNum,
+                'status' => 'ALARM',
+                'alarm' => true,
+                'trouble' => false,
+                'bell' => true,
+                'display_text' => '#' . $zoneNum
+            ];
         }
 
-        // Cari semua data slave
-        preg_match_all('/<STX>([0-9A-F]{2,6})/i', $rawData, $matches);
-
-        \Log::info('Found slave segments: ' . json_encode($matches[1]));
-
-        $slaveData = [];
-        $processedAddresses = [];
-        $hasSystemAlarm = false; // ← FLAG UNTUK SYSTEM ALARM
-        $hasSystemTrouble = false; // ← FLAG UNTUK SYSTEM TROUBLE
-
-        foreach ($matches[1] as $segment) {
-            // Determine slave number from ADDRESS, bukan urutan
-            $address = substr($segment, 0, 2);
-            $slaveNumber = hexdec($address);
-
-            \Log::info("Segment: {$segment} -> Address: {$address} -> Slave: {$slaveNumber}");
-
-            // Skip jika slave number diluar range 1-63
-            if ($slaveNumber < 1 || $slaveNumber > 63) {
-                \Log::warning("Invalid slave number: {$slaveNumber} from address: {$address}");
-                continue;
-            }
-
-            // Skip jika sudah diproses
-            if (in_array($slaveNumber, $processedAddresses)) {
-                continue;
-            }
-
-            $processedAddresses[] = $slaveNumber;
-            $parsedSlave = $this->parseSlaveSegment($slaveNumber, $segment);
-            $slaveData[] = $parsedSlave;
-
-            // ✅ CHECK JIKA SLAVE MEMILIKI ALARM ATAU TROUBLE
-            if ($parsedSlave['status'] === 'ALARM') {
-                $hasSystemAlarm = true;
-                \Log::info("🚨 SYSTEM ALARM TRIGGERED by Slave {$slaveNumber}");
-            } elseif ($parsedSlave['status'] === 'TROUBLE') {
-                $hasSystemTrouble = true;
-                \Log::info("⚠️ SYSTEM TROUBLE TRIGGERED by Slave {$slaveNumber}");
-            }
-        }
-
-        // Fill sisanya dengan offline slaves
-        $finalSlaveData = [];
-        for ($slaveNumber = 1; $slaveNumber <= $this->totalSlaves; $slaveNumber++) {
-            $found = false;
-
-            foreach ($slaveData as $slave) {
-                if ($slave['slave_number'] == $slaveNumber) {
-                    $finalSlaveData[] = $slave;
-                    $found = true;
-                    break;
-                }
-            }
-
-            if (!$found) {
-                $finalSlaveData[] = $this->createOfflineSlave($slaveNumber);
-            }
-        }
-
-        // ✅ SIMPAN STATUS SYSTEM KE SESSION ATAU CACHE
-        // Ini akan digunakan untuk menyalakan lampu master
-        session([
-            'system_alarm_active' => $hasSystemAlarm,
-            'system_trouble_active' => $hasSystemTrouble
-        ]);
-
-        \Log::info("System Status - Alarm: " . ($hasSystemAlarm ? 'YES' : 'NO') . ", Trouble: " . ($hasSystemTrouble ? 'YES' : 'NO'));
-
-        return $finalSlaveData;
+        return [
+            'slave_number' => $slaveNumber,
+            'address' => str_pad($slaveNumber, 2, '0', STR_PAD_LEFT),
+            'status' => 'ALARM',
+            'bell_active' => true,
+            'zones' => $zones,
+            'raw_data' => 'DRILL_MODE',
+            'online' => true,
+            'display_name' => '' . $slaveNumber
+        ];
     }
 
     private function parseSlaveSegment($slaveNumber, $segment)
@@ -307,15 +334,18 @@ class FireAlarmController extends Controller
             $troubleByte = hexdec(substr($segment, 2, 2));
             $alarmByte = hexdec(substr($segment, 4, 2));
 
+            \Log::info("Processing slave {$slaveNumber}: TroubleByte={$troubleByte}, AlarmByte={$alarmByte}");
+
             return $this->parseSlaveStatus($slaveNumber, $address, $troubleByte, $alarmByte, $segment);
         }
 
-        // Handle slave offline (data 2-digit)
+        // Handle slave offline (data 2-digit) - mungkin tidak diperlukan
         if (strlen($segment) === 2) {
             return $this->createOfflineSlave($slaveNumber);
         }
 
         // Data tidak dikenali
+        \Log::warning("Unrecognized segment format: {$segment}");
         return $this->createOfflineSlave($slaveNumber);
     }
 
@@ -324,9 +354,14 @@ class FireAlarmController extends Controller
         $zones = [];
         $hasAlarm = false;
         $hasTrouble = false;
-        $bellActive = ($alarmByte & 0x20) !== 0;
 
-        // OPTIMIZED: Loop tanpa logging berlebihan
+        // DEBUG: Log the byte values
+        \Log::info("Slave {$slaveNumber} - TroubleByte: " . decbin($troubleByte) . " ({$troubleByte}), AlarmByte: " . decbin($alarmByte) . " ({$alarmByte})");
+
+        // Bell active jika bit 5 (0x20) pada alarmByte aktif
+        $bellActive = ($alarmByte & 0x20) !== 0;
+        \Log::info("Slave {$slaveNumber} - Bell active: " . ($bellActive ? 'YES' : 'NO'));
+
         for ($zoneNum = 1; $zoneNum <= 5; $zoneNum++) {
             $bitMask = 1 << ($zoneNum - 1);
 
@@ -345,6 +380,8 @@ class FireAlarmController extends Controller
                 $status = 'TROUBLE';
             }
 
+            \Log::info("Slave {$slaveNumber} Zone {$zoneNum} - Status: {$status}, Alarm: " . ($alarm ? 'YES' : 'NO') . ", Trouble: " . ($trouble ? 'YES' : 'NO'));
+
             $zones[] = [
                 'number' => $zoneNum,
                 'global_number' => (($slaveNumber - 1) * 5) + $zoneNum,
@@ -352,7 +389,7 @@ class FireAlarmController extends Controller
                 'alarm' => $alarm,
                 'trouble' => $trouble,
                 'bell' => $bellActive,
-                'display_text' => 'Z' . $zoneNum
+                'display_text' => '' . $zoneNum
             ];
         }
 
@@ -363,6 +400,8 @@ class FireAlarmController extends Controller
             $overallStatus = 'TROUBLE';
         }
 
+        \Log::info("Slave {$slaveNumber} Overall Status: {$overallStatus}");
+
         return [
             'slave_number' => $slaveNumber,
             'address' => $address,
@@ -371,7 +410,7 @@ class FireAlarmController extends Controller
             'zones' => $zones,
             'raw_data' => $rawData,
             'online' => true,
-            'display_name' => 'S' . $slaveNumber
+            'display_name' => '#' . $slaveNumber
         ];
     }
 
@@ -386,7 +425,7 @@ class FireAlarmController extends Controller
                 'alarm' => false,
                 'trouble' => false,
                 'bell' => false,
-                'display_text' => 'Z' . $zoneNum
+                'display_text' => '' . $zoneNum
             ];
         }
 
@@ -398,7 +437,7 @@ class FireAlarmController extends Controller
             'zones' => $zones,
             'raw_data' => '',
             'online' => false,
-            'display_name' => 'S' . $slaveNumber
+            'display_name' => '#' . $slaveNumber
         ];
     }
 
@@ -457,7 +496,7 @@ class FireAlarmController extends Controller
                 $masterStatus = $this->parseMasterStatus($allSlaveData['raw_data']);
             }
 
-            // SLAVE DATA - JANGAN DIUBAH
+            // SLAVE DATA
             $slaveData = [];
             if (isset($allSlaveData['raw_data'])) {
                 $slaveData = $this->parseCompletePoolingData($allSlaveData['raw_data']);
@@ -473,7 +512,7 @@ class FireAlarmController extends Controller
                 'systemStatus' => $systemStatus,
                 'bellStatus' => $bellStatus,
                 'projectInfo' => $projectInfo,
-                'masterStatus' => $masterStatus, // ← TAMBAH INI
+                'masterStatus' => $masterStatus,
                 'stats' => $stats,
                 'lastUpdate' => now()->toISOString()
             ]);
@@ -484,6 +523,144 @@ class FireAlarmController extends Controller
                 'success' => false,
                 'error' => $e->getMessage()
             ], 500);
+        }
+    }
+
+    public function sendCommand(Request $request)
+    {
+        try {
+            $command = $request->input('command');
+            $timestamp = $request->input('timestamp');
+
+            \Log::info("Command received: {$command} at {$timestamp}");
+
+            $success = true;
+            $message = '';
+
+            if ($command === 'DRILL') {
+                $message = 'Drill mode activated locally';
+                \Log::info('🚨 DRILL MODE ACTIVATED LOCALLY');
+            } elseif ($command === 'SYSTEM_RESET') {
+                $message = 'System reset completed locally';
+                \Log::info('🔄 SYSTEM RESET LOCALLY');
+            } elseif ($command === 'SILENCE') {
+                $message = 'Alarms silenced locally';
+                \Log::info('🔇 SILENCE LOCALLY');
+            } elseif ($command === 'ACKNOWLEDGE') {
+                $message = 'Alarms acknowledged locally';
+                \Log::info('✅ ACKNOWLEDGE LOCALLY');
+            } else {
+                $message = 'Unknown command';
+                $success = false;
+            }
+
+            return response()->json([
+                'success' => $success,
+                'message' => $message,
+                'command' => $command,
+                'timestamp' => now()->toISOString()
+            ]);
+
+        } catch (\Exception $e) {
+            \Log::error('Command error: ' . $e->getMessage());
+            return response()->json([
+                'success' => false,
+                'error' => $e->getMessage(),
+                'message' => 'Command execution failed'
+            ], 500);
+        }
+    }
+
+    // METHOD UNTUK DRILL MODE
+    private function triggerDrillMode()
+    {
+        \Log::info('🚨 DRILL MODE ACTIVATED - All slaves to ALARM');
+
+        // Simulate semua slave menjadi ALARM
+        $drillData = [
+            'drill_active' => true,
+            'activated_at' => now()->toISOString(),
+            'all_slaves_alarm' => true
+        ];
+
+        // Save ke Firebase
+        if ($this->database) {
+            $this->database->getReference('system_mode')->set($drillData);
+        }
+
+        session(['drill_mode' => true]);
+    }
+
+    // METHOD UNTUK SYSTEM RESET
+    private function resetSystem()
+    {
+        \Log::info('🔄 SYSTEM RESET - All slaves to NORMAL');
+
+        // Reset semua ke normal
+        if ($this->database) {
+            $this->database->getReference('system_mode')->set([
+                'drill_active' => false,
+                'reset_at' => now()->toISOString()
+            ]);
+        }
+
+        session(['drill_mode' => false]);
+    }
+
+    // METHOD UNTUK SILENCE
+    private function silenceAlarms()
+    {
+        \Log::info('🔇 SILENCE - Bells silenced');
+
+        if ($this->database) {
+            $this->database->getReference('system_mode/silenced')->set(true);
+        }
+    }
+
+    // METHOD UNTUK ACKNOWLEDGE  
+    private function acknowledgeAlarms()
+    {
+        \Log::info('✅ ACKNOWLEDGE - Alarms acknowledged');
+
+        if ($this->database) {
+            $this->database->getReference('system_mode/acknowledged')->set(true);
+        }
+    }
+
+    // METHOD UNTUK CHECK CONNECTION
+    public function checkConnection()
+    {
+        return response()->json([
+            'connected' => $this->firebaseConnected,
+            'timestamp' => now()->toISOString()
+        ]);
+    }
+
+    // METHOD UNTUK COMMAND HISTORY
+    public function getCommandHistory()
+    {
+        if (!$this->database) {
+            return response()->json([
+                'success' => false,
+                'error' => 'Database not connected'
+            ]);
+        }
+
+        try {
+            $commands = $this->database->getReference('commands')
+                ->orderByKey()
+                ->limitToLast(10)
+                ->getValue();
+
+            return response()->json([
+                'success' => true,
+                'commands' => $commands ?: []
+            ]);
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'error' => $e->getMessage()
+            ]);
         }
     }
 }
